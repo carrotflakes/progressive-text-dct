@@ -1,6 +1,9 @@
-# Tested versions (Python 3.12, CUDA 12/13). torch pulls the right CUDA wheels
-# automatically on RunPod's CUDA images. Pin loosely so newer GPUs/drivers work.
-torch>=2.4
+# NOTE: torch is intentionally NOT listed here. It must match the machine's
+# CUDA driver, and RunPod GPU pods already ship a working torch. setup.sh makes
+# the venv with --system-site-packages so that pre-installed torch is reused;
+# installing torch from PyPI here would pull a too-new CUDA build and fail with
+# "NVIDIA driver too old". If your machine has no torch, install it yourself:
+#   pip install torch   (or the right wheel from https://pytorch.org)
 transformers>=4.44
 peft>=0.12
 datasets>=2.20
