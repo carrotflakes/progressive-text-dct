@@ -55,6 +55,21 @@ grad_accum). Override the step count without editing the config:
 bash scripts/run_all.sh 2000    # cheaper: 2000 steps per variant
 ```
 
+### Unattended run with auto-stop (don't pay for idle time)
+
+RunPod pods have no dashboard "idle auto-stop", but a pod can stop *itself* when
+the job finishes (`runpodctl` + `$RUNPOD_POD_ID` are preinstalled). Use a PAT so
+results are pushed back before the pod terminates:
+
+```bash
+export GITHUB_TOKEN=ghp_xxx     # PAT with 'repo' (contents:write) scope
+export STOP_MODE=remove         # remove = terminate (no billing) | stop = keep disk
+bash scripts/run_unattended.sh  # setup -> sanity -> train+eval -> push -> self-stop
+```
+
+`set -e` aborts before the self-stop on any failure, so a broken run leaves the
+pod alive for debugging; a successful run pushes results, then removes the pod.
+
 ### Rough time/quality guidance (per-variant `steps`, ×4 variants)
 
 The default (3000) is budget-leaning. Hypotheses H1–H4 are checkable even at the
