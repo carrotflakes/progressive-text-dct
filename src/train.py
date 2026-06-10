@@ -61,6 +61,8 @@ def main():
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--variant", default="main", choices=list(VARIANTS))
     ap.add_argument("--steps", type=int, default=None)
+    ap.add_argument("--micro_batch", type=int, default=None,
+                    help="override train.micro_batch_size (e.g. for small GPUs)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--sanity", action="store_true")
     args = ap.parse_args()
@@ -80,7 +82,7 @@ def main():
     if args.sanity:
         tcfg.update(cfg["sanity"])
     steps = args.steps or tcfg["steps"]
-    micro_bs = tcfg["micro_batch_size"]
+    micro_bs = args.micro_batch or tcfg["micro_batch_size"]
     accum = tcfg.get("grad_accum", 1)
     k_max = cfg["compress"]["k_max"]
 

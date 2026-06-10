@@ -1,0 +1,13 @@
+# Tested versions (Python 3.12, CUDA 12/13). torch pulls the right CUDA wheels
+# automatically on RunPod's CUDA images. Pin loosely so newer GPUs/drivers work.
+torch>=2.4
+transformers>=4.44
+peft>=0.12
+datasets>=2.20
+scipy>=1.12
+sentence-transformers>=3.0
+matplotlib>=3.8
+sacrebleu>=2.4
+pyyaml>=6.0
+accelerate>=0.33
+numpy>=1.26
