@@ -4,7 +4,21 @@
 
 ## 1. 実験設定の要約
 
-- TODO: モデル、データ量、学習時間、ハードウェア
+- **ベースLM**: Qwen/Qwen2.5-0.5B（hidden=896, 24層, 語彙152k, tied embeddings）。ロード成功のためフォールバック(gpt2)は不使用
+- **データ**: Salesforce/wikitext (wikitext-103-raw-v1)。32〜128トークンのチャンクに分割。train 200,000 / validation 2,000 / test 2,000（val/testはそれぞれvalidation/test splitから取得しリークを回避）。平均チャンク長 ~80トークン
+- **圧縮**: 系列方向の直交DCT(type-2, norm='ortho')、先頭K係数を保持。K_max=64
+- **デコーダ**: LoRA(r=16, α=32, 全attention+MLP線形層) + 入力プロジェクション/係数インデックス埋め込み/長さ埋め込み/BOSをフル学習。学習対象 8.8M / 全503M (1.75%)
+- **ハードウェア**: 開発・サニティはローカル RTX 4070 (16GB)。**本学習はRunPod A6000 (48GB) を予定**（後述の理由でローカル16GBでは本設定がOOMするため）
+- **精度**: 凍結ベース重みbf16、forward/backwardはbf16 autocast、LoRA/extrasパラメータはfp32マスター
+- **学習時間**: TODO（本学習後に記入）
+
+### Phase 1 サニティチェック結果 ✅
+
+100サンプルをK=64固定で過学習させ、**復元トークン精度 token_acc=1.0000、完全一致 100/100、train loss 4.29→0.0001**。スケール正規化(h_scale)・長さ条件埋め込み・マスク処理が正しいことを確認（`results/phase1_sanity.json`）。これによりPhase 2へ進める状態。
+
+### 単体テスト ✅
+
+DCT実装をscipy.fft.dct(type-2, norm='ortho')と比較し1e-10精度で一致、直交往復・切り詰め誤差の単調性を確認（`src/test_dct.py`）。
 
 ## 2. 品質 vs K 曲線
 
@@ -43,7 +57,10 @@
 ## 7. 失敗・予想外の挙動
 
 - datasets 5.0 では `wikitext` が名前空間必須になっており `Salesforce/wikitext` に変更が必要だった。
-- TODO: 実験中に発見したことを追記
+- **ハードウェア制約によるスケール調整**: 当初のローカルGPUは RTX 4070 (16GB)。task.md既定の20,000step×eff.batch32は実測1.76s/step換算で**1本約19時間・4本約78時間**となり「数時間以内」を大幅超過。さらに本設定の推奨バッチ(A6000向けmicro_batch=48)は16GBではOOM。このため**本学習はRunPod A6000 (48GB)で実施**する方針とし、`config.yaml`のデフォルトを48GB向け(micro_batch=48, grad_accum=1, steps=8000≈1.9エポック)に設定した。step数はCLI/スクリプトから可変(`run_all.sh STEPS`)。縮小の理由と手順はREADMEに明記。
+- enc0(encoder_layer=0=生埋め込み)のh_scaleは0.015と非常に小さい(生埋め込みのRMS)。グローバルスカラー正規化により学習レンジは他バリアントと揃う。
+- evaluate.py検証で、**学習なしB1ベースライン(逆DCT+最近傍)がK=64でacc=0.99に達する**ことを確認。これはn≤Kのチャンクで全係数が保持され生埋め込みが完全復元されるため。小K(K≤8)ではacc<0.18に破綻し、H3の予想挙動と整合。
+- TODO: 本学習中に発見したことを追記
 
 ## 8. 再現方法
 
