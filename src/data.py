@@ -97,28 +97,44 @@ def attach_k(tokens_list, rng, k_max, variant="main", fixed_k=None):
 
 class ChunkBatcher:
     """Yields batches of token chunks with per-sample K (and B3 coefficient
-    indices) sampled from a seeded RNG. Single-process, infinite iterator."""
+    indices) sampled from a seeded RNG. Single-process, infinite iterator.
+
+    Batches are length-bucketed: a pool of bucket_factor*batch_size shuffled
+    chunks is sorted by length and split into batches (yielded in random
+    order) to cut padding waste."""
 
     def __init__(self, chunks, batch_size, k_max, seed, variant="main",
-                 fixed_k=None):
+                 fixed_k=None, bucket_factor=8):
         self.chunks = chunks
         self.batch_size = batch_size
         self.k_max = k_max
         self.variant = variant
         self.fixed_k = fixed_k
+        self.bucket_factor = bucket_factor
         self.rng = random.Random(seed)
         self.order = list(range(len(chunks)))
-        self.pos = len(chunks)  # force shuffle on first batch
+        self.pos = len(chunks)  # force shuffle on first pool
+        self.pool = []
 
-    def next_batch(self):
-        batch = []
-        for _ in range(self.batch_size):
+    def _refill(self):
+        pool = []
+        for _ in range(self.batch_size * self.bucket_factor):
             if self.pos >= len(self.order):
                 self.rng.shuffle(self.order)
                 self.pos = 0
-            batch.append(self.chunks[self.order[self.pos]])
+            pool.append(self.chunks[self.order[self.pos]])
             self.pos += 1
-        return attach_k(batch, self.rng, self.k_max, self.variant, self.fixed_k)
+        pool.sort(key=len)
+        batches = [pool[s : s + self.batch_size]
+                   for s in range(0, len(pool), self.batch_size)]
+        self.rng.shuffle(batches)
+        self.pool = batches
+
+    def next_batch(self):
+        if not self.pool:
+            self._refill()
+        return attach_k(self.pool.pop(), self.rng, self.k_max, self.variant,
+                        self.fixed_k)
 
 
 def fixed_eval_items(chunks, k, variant, seed):

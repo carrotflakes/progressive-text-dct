@@ -223,19 +223,21 @@ def greedy_generate(lm, embed_tokens, prefix_embeds, prefix_mask, gen_lens,
 # ---------------------------------------------------------------- assembly
 
 def load_base(cfg, device):
-    """Load tokenizer + base LM (fp32 weights, autocast at runtime)."""
+    """Load tokenizer + base LM. Base weights in weights_dtype (default bf16,
+    halves memory traffic); LoRA/extras params are kept fp32 by the trainer."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    wdtype = getattr(torch, cfg["model"].get("weights_dtype", "bfloat16"))
     name = cfg["model"]["base_model"]
     try:
         tok = AutoTokenizer.from_pretrained(name)
-        lm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32)
+        lm = AutoModelForCausalLM.from_pretrained(name, dtype=wdtype)
     except Exception as e:  # noqa: BLE001
         print(f"failed to load {name} ({e}); falling back to "
               f"{cfg['model']['fallback_model']}")
         name = cfg["model"]["fallback_model"]
         tok = AutoTokenizer.from_pretrained(name)
-        lm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32)
+        lm = AutoModelForCausalLM.from_pretrained(name, dtype=wdtype)
     lm.to(device)
     lm.config.use_cache = False
     return tok, lm

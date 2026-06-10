@@ -88,6 +88,9 @@ def main():
     pad_id = tok.pad_token_id or tok.eos_token_id
     chunks = prepare_chunks(cfg, tok)
     lm = apply_lora(lm_base, cfg)
+    for p in lm.parameters():  # fp32 master weights for LoRA params
+        if p.requires_grad:
+            p.data = p.data.float()
     backbone = get_backbone(lm)
     embed_tokens = backbone.embed_tokens
     d_model = lm.config.hidden_size

@@ -5,7 +5,8 @@ model:
   base_model: Qwen/Qwen2.5-0.5B
   fallback_model: gpt2
   encoder_layer: 4        # 0 = raw embeddings, L = hidden state after layer L
-  dtype: bfloat16         # autocast dtype (weights kept fp32 for stable LoRA training)
+  dtype: bfloat16         # autocast dtype
+  weights_dtype: bfloat16 # frozen base weights; LoRA/extras kept fp32
 
 data:
   dataset: Salesforce/wikitext

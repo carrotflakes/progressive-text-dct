@@ -2,6 +2,8 @@
 # Phase 2: train all four variants sequentially.
 # Usage: scripts/run_train.sh [STEPS]
 set -e
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTHONUNBUFFERED=1
 cd "$(dirname "$0")/.."
 STEPS=${1:-}
 EXTRA=()
