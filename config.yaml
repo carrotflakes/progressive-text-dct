@@ -29,19 +29,21 @@ lora:
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 
 train:
-  # Defaults tuned for an NVIDIA A6000 (48GB). On smaller GPUs lower
-  # micro_batch_size (and raise grad_accum to keep the effective batch).
-  # steps is overridable from the CLI (--steps) and scripts (run_all.sh STEPS).
-  steps: 8000             # ~1.9 effective epochs over 200k chunks at eff.batch 48
-  micro_batch_size: 48
-  grad_accum: 1           # effective batch = 48
+  # Defaults tuned for an NVIDIA RTX 4090 (24GB), budget-leaning.
+  # Memory here is dominated by the 152k-vocab logits, so micro_batch_size=16
+  # already uses ~16GB; we keep it at 16 and reach effective batch 32 via
+  # grad_accum=2 (fits 24GB with margin). steps is overridable from the CLI
+  # (--steps) and scripts (run_all.sh STEPS).
+  steps: 3000             # ~0.5 epoch over 200k chunks; ~1h/run on a 4090
+  micro_batch_size: 16
+  grad_accum: 2           # effective batch = 32
   lr_proj: 1.0e-4         # input projection / index emb / length emb / bos
   lr_lora: 2.0e-4
   weight_decay: 0.01
-  warmup_steps: 500       # then cosine decay to 0
+  warmup_steps: 300       # then cosine decay to 0
   grad_clip: 1.0
   val_every: 500
-  val_samples: 512
+  val_samples: 256
   log_every: 50
   calib_samples: 256      # samples used to compute the global hidden-state scale h_scale
 
