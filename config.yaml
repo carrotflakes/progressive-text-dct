@@ -1,0 +1,57 @@
+# Progressive text compression via sequence-direction DCT
+seed: 42
+
+model:
+  base_model: Qwen/Qwen2.5-0.5B
+  fallback_model: gpt2
+  encoder_layer: 4        # 0 = raw embeddings, L = hidden state after layer L
+  dtype: bfloat16         # autocast dtype (weights kept fp32 for stable LoRA training)
+
+data:
+  dataset: Salesforce/wikitext
+  dataset_config: wikitext-103-raw-v1
+  n_min: 32               # chunk length range in tokens
+  n_max: 128
+  num_train_chunks: 200000
+  num_val: 2000           # taken from the validation split
+  num_test: 2000          # taken from the test split
+  cache_dir: data
+
+compress:
+  k_max: 64               # max number of DCT coefficients kept
+  # K sampled per-sample at train time: K = round(exp(uniform(log 1, log k_max)))
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+train:
+  steps: 20000            # batch-32-equivalent steps; may be scaled down (see report design log)
+  micro_batch_size: 16
+  grad_accum: 2           # effective batch = 32
+  lr_proj: 1.0e-4         # input projection / index emb / length emb / bos
+  lr_lora: 2.0e-4
+  weight_decay: 0.01
+  warmup_steps: 500       # then cosine decay to 0
+  grad_clip: 1.0
+  val_every: 500
+  val_samples: 256
+  log_every: 50
+  calib_samples: 256      # samples used to compute the global hidden-state scale h_scale
+
+eval:
+  k_values: [1, 2, 4, 8, 16, 32, 64]
+  gen_batch_size: 96
+  qualitative_ks: [1, 4, 16, 64]
+  qualitative_n: 5
+  semantic_model: sentence-transformers/all-MiniLM-L6-v2
+
+sanity:
+  num_samples: 100
+  steps: 1500
+  micro_batch_size: 16
+  grad_accum: 1
+  lr_proj: 3.0e-4
+  lr_lora: 6.0e-4
