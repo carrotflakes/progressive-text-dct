@@ -28,14 +28,20 @@ def _chunk_token_stream(token_iter, rng, n_min, n_max, num_chunks):
 
 
 def _tokens_from_split(dataset, tokenizer, batch_rows=2000):
-    """Yield token ids from a wikitext split, tokenizing in row batches."""
+    """Yield token ids from a wikitext split, tokenizing in row batches.
+
+    We tokenize big joined blocks only to get a token *stream*, which is then
+    cut into 32..128-token chunks — the long block is never fed to the model,
+    so the tokenizer's "sequence longer than model max" warning is irrelevant.
+    """
     n = len(dataset)
     for start in range(0, n, batch_rows):
         rows = dataset[start : start + batch_rows]["text"]
         text = "".join(rows)
         if not text:
             continue
-        ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+        ids = tokenizer(text, add_special_tokens=False,
+                        verbose=False)["input_ids"]
         yield from ids
 
 
