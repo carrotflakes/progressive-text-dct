@@ -46,10 +46,12 @@ bash scripts/run_all.sh                     # train 4 variants + evaluate (~4-5 
 git add -A results report.md && git commit -m results && git push   # save back
 ```
 
-`config.yaml` defaults are tuned for the 4090: micro_batch_size=16, grad_accum=2
-(effective batch 32). Memory is dominated by the 152k-vocab logits, so batch 16
-already uses ~16GB. On a bigger card you can raise `micro_batch_size` (and drop
-grad_accum). Override the step count without editing the config:
+`config.yaml` defaults are tuned for the 4090: micro_batch_size=16, grad_accum=1
+(effective batch 16). Memory is dominated by the 152k-vocab logits, so batch 16
+already uses ~16GB. This workload is launch/CPU-overhead-bound (small model,
+small batch), so a 4090 runs ~1.5 s/step — barely faster than a 4070; the win is
+cost, not raw speed. On a bigger card you can raise `micro_batch_size`. Override
+the step count without editing the config:
 
 ```bash
 bash scripts/run_all.sh 2000    # cheaper: 2000 steps per variant
@@ -74,13 +76,13 @@ pod alive for debugging; a successful run pushes results, then removes the pod.
 
 The default (3000) is budget-leaning. Hypotheses H1–H4 are checkable even at the
 low end; higher steps mainly sharpen near-perfect reconstruction at large K.
+Times assume ~1.5 s/step at grad_accum=1 on a 4090.
 
-| steps/variant | eff. epochs | ~time/run (4090) | use case                 |
-|---------------|-------------|------------------|--------------------------|
-| 2000          | ~0.3        | ~40 min          | cheapest, rough curves   |
-| 3000 (default)| ~0.5        | ~1 h             | budget hypothesis check  |
-| 6000          | ~1.0        | ~2 h             | solid reconstruction     |
-| 12000+        | ~1.9        | ~4 h             | best fidelity at high K  |
+| steps/variant | ~time/run | 4 variants | use case                |
+|---------------|-----------|------------|-------------------------|
+| 2000          | ~50 min   | ~3.3 h     | cheapest, rough curves  |
+| 3000 (default)| ~1.25 h   | ~5 h       | budget hypothesis check |
+| 6000          | ~2.5 h    | ~10 h      | solid reconstruction    |
 
 ## Local development (smaller GPU)
 

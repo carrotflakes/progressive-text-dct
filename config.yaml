@@ -34,9 +34,10 @@ train:
   # already uses ~16GB; we keep it at 16 and reach effective batch 32 via
   # grad_accum=2 (fits 24GB with margin). steps is overridable from the CLI
   # (--steps) and scripts (run_all.sh STEPS).
-  steps: 3000             # ~0.5 epoch over 200k chunks; ~1h/run on a 4090
+  steps: 3000             # ~0.24 epoch over 200k chunks; ~1.25h/run on a 4090
   micro_batch_size: 16
-  grad_accum: 2           # effective batch = 32
+  grad_accum: 1           # effective batch = 16 (overhead-bound workload: accum=1
+                          # halves wall-clock vs accum=2; fine for LoRA at this scale)
   lr_proj: 1.0e-4         # input projection / index emb / length emb / bos
   lr_lora: 2.0e-4
   weight_decay: 0.01
