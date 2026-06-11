@@ -44,7 +44,7 @@ train:
 
 eval:
   k_values: [1, 2, 4, 8, 16, 32, 64]
-  gen_batch_size: 512
+  gen_batch_size: 256
   qualitative_ks: [1, 4, 16, 64]
   qualitative_n: 5
   semantic_model: sentence-transformers/all-MiniLM-L6-v2   # eval-only
