@@ -1,0 +1,56 @@
+# Progressive text compression via sequence-direction DCT — from-scratch version.
+# No pretrained weights anywhere in the train/compress pipeline; the only
+# pretrained model is the evaluation-only sentence-transformers scorer.
+seed: 42
+
+tokenizer:
+  vocab_size: 16384
+  path: data/bpe16k.json     # trained on the wikitext-103 train split
+
+data:
+  dataset: Salesforce/wikitext
+  dataset_config: wikitext-103-raw-v1
+  n_min: 32                  # chunk length range in tokens
+  n_max: 128
+  num_train_chunks: -1       # -1 = use the full train split
+  num_val: 2000              # from the validation split
+  num_test: 2000             # from the test split
+  cache_dir: data
+
+compress:
+  k_max: 64                  # max kept DCT coefficients
+  d_emb: 512                 # encoder embedding dim (DCT operates here)
+
+model:                       # scratch Pre-LN Transformer decoder
+  d_model: 512
+  n_layers: 8
+  n_heads: 8
+  d_ff: 2048
+  dropout: 0.0
+  rope_base: 10000
+
+train:
+  steps: 100000              # spec baseline; may be uniformly scaled down (report it)
+  micro_batch_size: 64
+  grad_accum: 1              # effective batch = 64
+  lr: 3.0e-4
+  weight_decay: 0.1
+  warmup_steps: 2000         # then cosine decay to 0
+  grad_clip: 1.0
+  val_every: 1000
+  val_samples: 512
+  log_every: 100
+  ckpt_every_sec: 900        # checkpoint every 15 min, resumable
+
+eval:
+  k_values: [1, 2, 4, 8, 16, 32, 64]
+  gen_batch_size: 512
+  qualitative_ks: [1, 4, 16, 64]
+  qualitative_n: 5
+  semantic_model: sentence-transformers/all-MiniLM-L6-v2   # eval-only
+
+sanity:
+  num_samples: 100
+  steps: 4000
+  micro_batch_size: 32
+  lr: 1.0e-3
