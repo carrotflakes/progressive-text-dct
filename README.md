@@ -86,9 +86,16 @@ Times assume ~1.5 s/step at grad_accum=1 on a 4090.
 
 ## Local development (smaller GPU)
 
-Tested on an RTX 4070 (16GB): set `micro_batch_size: 16` in config.yaml. The
-sanity check and a scaled-down train both run there; the full A6000 batch will
-OOM on 16GB.
+Tested on an RTX 4070 (16GB) and an RTX 4090 (24GB): `micro_batch_size: 16`
+(~16GB) fits both. The sanity check and the budget train run on either.
+
+## Results (budget run)
+
+The committed results are from a deliberately small run (3000 steps/variant ≈
+7.5% of the spec's intended compute) — see [report.md](report.md). The pipeline
+is validated (sanity = 100% token reconstruction) and the progressive trend is
+visible, but absolute reconstruction quality is low due to undertraining. To
+reproduce a full-scale result, run `bash scripts/run_all.sh 15000`.
 
 ## Determinism
 
