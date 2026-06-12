@@ -29,6 +29,11 @@ model:                       # scratch Pre-LN Transformer decoder
   dropout: 0.0
   rope_base: 10000
 
+encoder:                     # task3: optional bidirectional contextualizer
+  n_layers: 4                # used by enc_dct / enc_latent variants
+  n_latents: 64              # learned latent queries (enc_latent)
+  cross_blocks: 2            # Perceiver-style latent update blocks
+
 train:
   steps: 100000              # spec baseline; may be uniformly scaled down (report it)
   micro_batch_size: 64

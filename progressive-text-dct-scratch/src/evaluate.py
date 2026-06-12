@@ -22,7 +22,9 @@ from model import ScratchLM
 
 LABEL = {"main": "main (DCT, learned E)", "b1": "B1 untrained NN decode",
          "b2": "B2 frozen-random E", "b3": "B3 random-K coeffs",
-         "b4": "B4 prefix truncation"}
+         "b4": "B4 prefix truncation",
+         "enc_dct": "A: encoder + DCT", "enc_latent": "B: encoder + latents",
+         "emb_dct": "C: embedding-only DCT"}
 
 
 def batches(n, bs):
@@ -65,7 +67,8 @@ def eval_b1(model, ids, lens, idx, valid):
 
 
 def spectrum_analysis(models, store, cfg, out_png, device, n_samples=2000):
-    """Mean DCT power per coefficient index for learned vs frozen-random E."""
+    """Mean DCT power per coefficient index of the pre-bottleneck
+    representation (raw E or encoder output)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -79,9 +82,9 @@ def spectrum_analysis(models, store, cfg, out_png, device, n_samples=2000):
             for idxs in batches(min(n_samples, len(store)), 256):
                 ids, lens, idx, valid = eval_batch(
                     store, idxs, n_max, "main", cfg["seed"], n_max, device)
-                h = model.enc_emb(ids).float()
-                h = h * (torch.arange(n_max, device=device)[None, :, None]
-                         < lens[:, None, None])
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    h = model.encode(ids, lens)
+                h = h.float()
                 z = model.dct.forward(h, lens)         # (B, n_max, d)
                 p = (z ** 2).mean(-1)                  # (B, n_max)
                 fmask = (torch.arange(n_max, device=device)[None, :]
@@ -114,6 +117,8 @@ def main():
     ap.add_argument("--variants", default="main,b2,b3,b4,b1")
     ap.add_argument("--runs", default="runs")
     ap.add_argument("--out", default="results")
+    ap.add_argument("--tag", default="",
+                    help="prefix for output filenames (e.g. task3_)")
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
 
@@ -140,11 +145,13 @@ def main():
     def load_model(variant):
         ck = torch.load(os.path.join(args.runs, variant, "ckpt.pt"),
                         map_location=device, weights_only=False)
-        m = ScratchLM(cfg, device).to(device)
+        arch = ck.get("arch", {"encoder": "none", "bottleneck": "dct"})
+        m = ScratchLM(cfg, device, **arch).to(device)
         m.load_state_dict(ck["model"])
         m.eval()
         return m, ck["mode"]
 
+    spectrum_variants = ("main", "b2", "enc_dct", "emb_dct")
     for variant in args.variants.split(","):
         src_variant = "main" if variant == "b1" else variant
         ck_path = os.path.join(args.runs, src_variant, "ckpt.pt")
@@ -152,7 +159,7 @@ def main():
             print(f"skip {variant}: no {ck_path}")
             continue
         model, mode = load_model(src_variant)
-        if variant in ("main", "b2"):
+        if variant in spectrum_variants:
             spec_models[LABEL[variant]] = model
         for k in k_values:
             match = total = exact = 0
@@ -185,22 +192,25 @@ def main():
             gen_store[(variant, k)] = hyps
             print(f"{variant} K={k}: acc={acc:.4f} em={em:.4f} bleu={bleu:.2f} "
                   f"chrf={chrf:.2f} sem={sem:.4f}", flush=True)
-        if variant not in ("main", "b2"):
+        if variant not in spectrum_variants:
             del model
             torch.cuda.empty_cache()
 
-    with open(os.path.join(args.out, "metrics.csv"), "w", newline="") as f:
+    tag = args.tag
+    with open(os.path.join(args.out, f"{tag}metrics.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["variant", "K", "token_acc", "exact_match", "bleu", "chrf",
                     "semsim"])
         w.writerows(rows)
 
-    plot_curves(rows, os.path.join(args.out, "curves.png"))
-    write_samples(gen_store, store, tok, cfg, os.path.join(args.out, "samples.md"),
-                  n_test)
+    qual_variant = args.variants.split(",")[0]
+    plot_curves(rows, os.path.join(args.out, f"{tag}curves.png"))
+    write_samples(gen_store, store, tok, cfg,
+                  os.path.join(args.out, f"{tag}samples.md"), n_test,
+                  qual_variant)
     if spec_models:
         spectrum_analysis(spec_models, store, cfg,
-                          os.path.join(args.out, "spectrum.png"), device)
+                          os.path.join(args.out, f"{tag}spectrum.png"), device)
     print("done")
 
 
@@ -210,7 +220,7 @@ def plot_curves(rows, path):
     import matplotlib.pyplot as plt
 
     cols = {"token_acc": 2, "chrf": 5, "semsim": 6}
-    order = ["main", "b1", "b2", "b3", "b4"]
+    order = ["main", "b1", "b2", "b3", "b4", "enc_dct", "enc_latent", "emb_dct"]
     variants = sorted({r[0] for r in rows},
                       key=lambda v: order.index(v) if v in order else 9)
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.2))
@@ -232,27 +242,28 @@ def plot_curves(rows, path):
     print(f"saved {path}")
 
 
-def write_samples(gen_store, store, tok, cfg, path, n_test):
+def write_samples(gen_store, store, tok, cfg, path, n_test, qual_variant="main"):
     qks = cfg["eval"]["qualitative_ks"]
     qn = cfg["eval"]["qualitative_n"]
+    others = sorted({v for v, _ in gen_store} - {qual_variant})
     picked = [i for i in range(n_test) if 40 <= len(store.get(i)) <= 90][:qn]
     esc = lambda t: t.replace("|", "\\|").replace("\n", " ⏎ ")  # noqa: E731
-    lines = ["# Qualitative samples (main, greedy)", ""]
+    lines = [f"# Qualitative samples ({qual_variant}, greedy)", ""]
     for i in picked:
         ref = tok.decode(store.get(i).tolist())
         lines += [f"## Sample {i} (n={len(store.get(i))})", "",
                   "| K | text |", "|---|------|",
                   f"| **original** | {esc(ref)} |"]
         for k in qks:
-            if ("main", k) in gen_store:
-                lines.append(f"| {k} | {esc(gen_store[('main', k)][i])} |")
+            if (qual_variant, k) in gen_store:
+                lines.append(f"| {k} | {esc(gen_store[(qual_variant, k)][i])} |")
         lines.append("")
     lines += ["## Variant comparison at K=16", ""]
     for i in picked:
         ref = tok.decode(store.get(i).tolist())
         lines += [f"### Sample {i}", "", "| variant | text |", "|---|------|",
                   f"| original | {esc(ref)} |"]
-        for v in ["b1", "b2", "b3", "b4"]:
+        for v in others:
             if (v, 16) in gen_store:
                 lines.append(f"| {v} | {esc(gen_store[(v, 16)][i])} |")
         lines.append("")

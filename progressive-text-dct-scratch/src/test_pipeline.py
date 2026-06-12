@@ -97,10 +97,50 @@ def test_prefix_mask():
     print("OK: prefix-LM attention mask semantics")
 
 
+def test_task3_archs():
+    """A (enc+DCT) and B (enc+latents): grads must reach encoder blocks,
+    E, and latent queries; generation shapes hold."""
+    dev = "cuda"
+    cfg = yaml.safe_load(open("config.yaml"))
+    cfg["model"]["n_layers"] = 2
+    cfg["encoder"]["n_layers"] = 2
+    B, n_max = 4, cfg["data"]["n_max"]
+    ids = torch.randint(0, 16384, (B, 100), device=dev)  # n_pad < n_max on purpose
+    lens = torch.tensor([40, 100, 32, 77], device=dev)
+    k_pad = 64
+    idx = torch.zeros(B, k_pad, dtype=torch.long, device=dev)
+    valid = torch.zeros(B, k_pad, dtype=torch.bool, device=dev)
+    for j, kj in enumerate([5, 64, 1, 13]):
+        kj = min(kj, int(lens[j]))
+        idx[j, :kj] = torch.arange(kj, device=dev)
+        valid[j, :kj] = True
+
+    for arch, mode in ((dict(encoder="transformer", bottleneck="dct"), "dct"),
+                       (dict(encoder="transformer", bottleneck="latent"),
+                        "latent")):
+        m = ScratchLM(cfg, dev, **arch).to(dev)
+        loss = m(ids, lens, idx, valid, mode=mode)
+        loss.backward()
+        assert m.enc_emb.weight.grad.abs().sum() > 0, f"{arch}: no grad to E"
+        g_enc = sum(p.grad.abs().sum().item()
+                    for p in m.enc_blocks.parameters())
+        assert g_enc > 0, f"{arch}: no grad to encoder blocks"
+        if mode == "latent":
+            assert m.latent_q.grad.abs().sum() > 0, "no grad to latent queries"
+        m.eval()
+        with torch.no_grad():
+            out = m.generate(ids, lens, idx, valid, mode=mode)
+        assert out.shape == (B, 100)
+        assert (out[2, 32:] == 0).all()
+        print(f"OK: task3 arch {arch['bottleneck']} loss={loss.item():.3f}, "
+              f"grads reach E/encoder{'/latents' if mode == 'latent' else ''}")
+
+
 if __name__ == "__main__":
     test_dct_scipy()
     test_reversibility()
     test_truncation_monotone()
     test_prefix_mask()
     test_model_grads_and_shapes()
+    test_task3_archs()
     print("ALL TESTS PASSED")

@@ -84,10 +84,53 @@ class Block(nn.Module):
         return x, new_past
 
 
-class ScratchLM(nn.Module):
-    """Decoder transformer + all conditioning embeddings + encoder table E."""
+class CrossBlock(nn.Module):
+    """Latent update block: cross-attention to encoder output + latent
+    self-attention + FFN (Perceiver-style, pre-LN)."""
 
-    def __init__(self, cfg, device):
+    def __init__(self, d, n_heads, d_ff):
+        super().__init__()
+        self.n_heads = n_heads
+        self.hd = d // n_heads
+        self.ln_q = nn.LayerNorm(d)
+        self.ln_kv = nn.LayerNorm(d)
+        self.q_proj = nn.Linear(d, d)
+        self.kv_proj = nn.Linear(d, 2 * d)
+        self.cross_out = nn.Linear(d, d)
+        self.ln_s = nn.LayerNorm(d)
+        self.self_qkv = nn.Linear(d, 3 * d)
+        self.self_out = nn.Linear(d, d)
+        self.ln_f = nn.LayerNorm(d)
+        self.ff1 = nn.Linear(d, d_ff)
+        self.ff2 = nn.Linear(d_ff, d)
+
+    def _heads(self, x):
+        B, T, _ = x.shape
+        return x.view(B, T, self.n_heads, self.hd).transpose(1, 2)
+
+    def forward(self, lat, enc, key_mask):
+        """lat (B, M, d); enc (B, n, d); key_mask (B, 1, 1, n) bool."""
+        q = self._heads(self.q_proj(self.ln_q(lat)))
+        k, v = self.kv_proj(self.ln_kv(enc)).chunk(2, dim=-1)
+        y = F.scaled_dot_product_attention(q, self._heads(k), self._heads(v),
+                                           attn_mask=key_mask)
+        lat = lat + self.cross_out(y.transpose(1, 2).reshape_as(lat))
+        q, k, v = self.self_qkv(self.ln_s(lat)).chunk(3, dim=-1)
+        y = F.scaled_dot_product_attention(
+            self._heads(q), self._heads(k), self._heads(v))
+        lat = lat + self.self_out(y.transpose(1, 2).reshape_as(lat))
+        return lat + self.ff2(F.gelu(self.ff1(self.ln_f(lat))))
+
+
+class ScratchLM(nn.Module):
+    """Decoder transformer + all conditioning embeddings + encoder table E.
+
+    Optional (task3): a bidirectional Transformer contextualizer over E before
+    the bottleneck (`encoder="transformer"`), and a learned-latent bottleneck
+    (`bottleneck="latent"`, mode="latent") instead of DCT.
+    """
+
+    def __init__(self, cfg, device, encoder="none", bottleneck="dct"):
         super().__init__()
         V = cfg["tokenizer"]["vocab_size"]
         d_emb = cfg["compress"]["d_emb"]
@@ -96,9 +139,25 @@ class ScratchLM(nn.Module):
         self.n_max = cfg["data"]["n_max"]
         self.k_max = cfg["compress"]["k_max"]
         self.d_emb = d_emb
+        self.arch = {"encoder": encoder, "bottleneck": bottleneck}
 
         # --- encoder side (the compressed representation lives here) ---
         self.enc_emb = nn.Embedding(V, d_emb)            # E, trained end-to-end
+        ecfg = cfg.get("encoder", {})
+        if encoder == "transformer":
+            self.enc_blocks = nn.ModuleList(
+                Block(d_emb, m["n_heads"], m["d_ff"], m["dropout"],
+                      ecfg.get("n_layers", 4))
+                for _ in range(ecfg.get("n_layers", 4)))
+            self.enc_ln = nn.LayerNorm(d_emb)
+        else:
+            self.enc_blocks = None
+        if bottleneck == "latent":
+            n_lat = ecfg.get("n_latents", 64)
+            self.latent_q = nn.Parameter(torch.randn(n_lat, d_emb) * 0.02)
+            self.cross_blocks = nn.ModuleList(
+                CrossBlock(d_emb, m["n_heads"], m["d_ff"])
+                for _ in range(ecfg.get("cross_blocks", 2)))
 
         # --- decoder side ---
         self.proj = nn.Linear(d_emb, d)
@@ -126,16 +185,34 @@ class ScratchLM(nn.Module):
 
     # ---------------- compression (differentiable, no detach!) ----------------
 
+    def encode(self, ids, lens):
+        """E lookup, optionally contextualized by the bidirectional encoder.
+        Returns (B, T, d_emb) with padding rows zeroed."""
+        valid = (torch.arange(ids.shape[1], device=ids.device)[None, :]
+                 < lens[:, None])
+        h = self.enc_emb(ids) * valid.unsqueeze(-1)
+        if self.enc_blocks is not None:
+            key_mask = valid[:, None, None, :]      # bidirectional, valid keys
+            for blk in self.enc_blocks:
+                h, _ = blk(h, key_mask, self.rope_cos, self.rope_sin)
+            h = self.enc_ln(h) * valid.unsqueeze(-1)
+        return h
+
     def compress(self, ids, lens, idx, idx_valid, mode="dct"):
-        """ids (B, n_max) padded token ids; lens (B,); idx (B, k_pad) kept
-        coefficient indices; idx_valid (B, k_pad) bool.
+        """ids (B, <=n_max) padded token ids; lens (B,); idx (B, k_pad) kept
+        coefficient/latent indices; idx_valid (B, k_pad) bool.
         Returns Z (B, k_pad, d_emb)."""
-        h = self.enc_emb(ids)                       # (B, <=n_max, d_emb)
-        h = h * (torch.arange(h.shape[1], device=h.device)[None, :, None]
-                 < lens[:, None, None])             # zero padding rows
-        if h.shape[1] < self.n_max:                 # DCT matrices are (n_max, n_max)
-            h = F.pad(h, (0, 0, 0, self.n_max - h.shape[1]))
-        if mode == "dct":
+        h = self.encode(ids, lens)
+        if mode == "latent":
+            valid = (torch.arange(ids.shape[1], device=ids.device)[None, :]
+                     < lens[:, None])
+            lat = self.latent_q.unsqueeze(0).expand(ids.shape[0], -1, -1)
+            for cb in self.cross_blocks:
+                lat = cb(lat, h, valid[:, None, None, :])
+            zfull = lat                              # (B, M, d_emb)
+        elif mode == "dct":
+            if h.shape[1] < self.n_max:             # DCT matrices are (n_max, n_max)
+                h = F.pad(h, (0, 0, 0, self.n_max - h.shape[1]))
             zfull = self.dct.forward(h.float(), lens).to(h.dtype)
         else:                                       # "trunc" (B4)
             zfull = h

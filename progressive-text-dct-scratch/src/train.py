@@ -26,7 +26,18 @@ from data import ChunkStore, eval_batch, make_batch, prepare_chunks
 from tokenizer import load_tokenizer
 from model import ScratchLM
 
-VARIANTS = {"main": "dct", "b2": "dct", "b3": "dct", "b4": "trunc"}
+VARIANTS = {
+    # task2
+    "main": {"mode": "dct"},
+    "b2": {"mode": "dct"},                                   # frozen random E
+    "b3": {"mode": "dct"},                                   # random-K indices
+    "b4": {"mode": "trunc"},
+    # task3 (same data/decoder; Muon recommended via --opt muon)
+    "enc_dct": {"mode": "dct", "encoder": "transformer"},    # A
+    "enc_latent": {"mode": "latent", "encoder": "transformer",
+                   "bottleneck": "latent"},                  # B
+    "emb_dct": {"mode": "dct"},                              # C (= main rerun)
+}
 
 
 def lr_lambda(step, warmup, total):
@@ -41,12 +52,16 @@ def main():
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--variant", default="main", choices=list(VARIANTS))
     ap.add_argument("--steps", type=int, default=None)
+    ap.add_argument("--opt", default="adamw", choices=["adamw", "muon"])
     ap.add_argument("--sanity", action="store_true")
     ap.add_argument("--resume", action="store_true")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
-    mode = VARIANTS[args.variant]
+    vcfg = VARIANTS[args.variant]
+    mode = vcfg["mode"]
+    arch = {"encoder": vcfg.get("encoder", "none"),
+            "bottleneck": vcfg.get("bottleneck", "dct")}
     out_dir = os.path.join("runs", ("sanity_" if args.sanity else "") + args.variant)
     os.makedirs(out_dir, exist_ok=True)
     seed = cfg["seed"]
@@ -74,18 +89,33 @@ def main():
     if args.sanity:
         n_train = cfg["sanity"]["num_samples"]
 
-    model = ScratchLM(cfg, device).to(device)
+    model = ScratchLM(cfg, device, **arch).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"[{args.variant}] mode={mode} params={n_params/1e6:.1f}M "
-          f"steps={steps} eff_batch={bs*accum}", flush=True)
+    print(f"[{args.variant}] mode={mode} arch={arch} opt={args.opt} "
+          f"params={n_params/1e6:.1f}M steps={steps} eff_batch={bs*accum}",
+          flush=True)
     if args.variant == "b2":
         model.enc_emb.weight.requires_grad_(False)   # frozen random E
 
     params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(params, lr=tcfg["lr"],
-                            weight_decay=tcfg["weight_decay"], betas=(0.9, 0.95))
-    sched = torch.optim.lr_scheduler.LambdaLR(
-        opt, lambda s: lr_lambda(s, tcfg["warmup_steps"], steps))
+    if args.opt == "muon":
+        from muon import Muon, split_params
+
+        muon_p, adamw_p = split_params(model)
+        muon_p = [p for p in muon_p if p.requires_grad]
+        adamw_p = [p for p in adamw_p if p.requires_grad]
+        print(f"  muon: {sum(p.numel() for p in muon_p)/1e6:.1f}M params, "
+              f"adamw: {sum(p.numel() for p in adamw_p)/1e6:.1f}M params",
+              flush=True)
+        opts = [torch.optim.AdamW(adamw_p, lr=tcfg["lr"], betas=(0.9, 0.95),
+                                  weight_decay=tcfg["weight_decay"]),
+                Muon(muon_p, lr=tcfg["lr"],
+                     weight_decay=tcfg["weight_decay"])]
+    else:
+        opts = [torch.optim.AdamW(params, lr=tcfg["lr"], betas=(0.9, 0.95),
+                                  weight_decay=tcfg["weight_decay"])]
+    scheds = [torch.optim.lr_scheduler.LambdaLR(
+        o, lambda s: lr_lambda(s, tcfg["warmup_steps"], steps)) for o in opts]
 
     start_step = 0
     rng = random.Random(seed + 1)
@@ -93,8 +123,10 @@ def main():
     if args.resume and os.path.exists(ckpt_path):
         sd = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(sd["model"])
-        opt.load_state_dict(sd["opt"])
-        sched.load_state_dict(sd["sched"])
+        for o, osd in zip(opts, sd["opt"]):
+            o.load_state_dict(osd)
+        for s, ssd in zip(scheds, sd["sched"]):
+            s.load_state_dict(ssd)
         start_step = sd["step"]
         rng.setstate(sd["rng"])
         print(f"resumed from step {start_step}", flush=True)
@@ -114,9 +146,11 @@ def main():
 
     def save_ckpt(step):
         tmp = ckpt_path + ".tmp"
-        torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
-                    "sched": sched.state_dict(), "step": step,
-                    "rng": rng.getstate(), "cfg": cfg,
+        torch.save({"model": model.state_dict(),
+                    "opt": [o.state_dict() for o in opts],
+                    "sched": [s.state_dict() for s in scheds], "step": step,
+                    "rng": rng.getstate(), "cfg": cfg, "arch": arch,
+                    "optimizer": args.opt,
                     "variant": args.variant, "mode": mode}, tmp)
         os.replace(tmp, ckpt_path)
 
@@ -126,7 +160,8 @@ def main():
     last_ckpt = t0
     fixed_k = k_max if args.sanity else None
     for step in range(start_step + 1, steps + 1):
-        opt.zero_grad(set_to_none=True)
+        for o in opts:
+            o.zero_grad(set_to_none=True)
         for _ in range(accum):
             indices = [rng.randrange(n_train) for _ in range(bs)]
             ids, lens, idx, valid = make_batch(
@@ -136,15 +171,17 @@ def main():
                 loss = model(ids, lens, idx, valid, mode=mode)
             (loss / accum).backward()
         torch.nn.utils.clip_grad_norm_(params, tcfg["grad_clip"])
-        opt.step()
-        sched.step()
+        for o in opts:
+            o.step()
+        for s in scheds:
+            s.step()
         lval = loss.item()
         ema = lval if ema is None else 0.98 * ema + 0.02 * lval
 
         if step % tcfg["log_every"] == 0 or step == 1:
             sps = (time.time() - t0) / (step - start_step)
             print(f"step {step}/{steps} loss {ema:.4f} "
-                  f"lr {sched.get_last_lr()[0]:.2e} {sps:.3f}s/step", flush=True)
+                  f"lr {scheds[0].get_last_lr()[0]:.2e} {sps:.3f}s/step", flush=True)
 
         if step % tcfg["val_every"] == 0 or step == steps:
             model.eval()
@@ -157,12 +194,12 @@ def main():
             model.train()
             sps = (time.time() - t0) / (step - start_step)
             logw.writerow([step, f"{ema:.5f}", f"{vloss:.5f}",
-                           f"{sched.get_last_lr()[0]:.6e}", f"{sps:.3f}"])
+                           f"{scheds[0].get_last_lr()[0]:.6e}", f"{sps:.3f}"])
             logf.flush()
             print(f"  -> val_loss {vloss:.4f}", flush=True)
         elif step % tcfg["log_every"] == 0:
             logw.writerow([step, f"{ema:.5f}", "",
-                           f"{sched.get_last_lr()[0]:.6e}",
+                           f"{scheds[0].get_last_lr()[0]:.6e}",
                            f"{(time.time() - t0) / (step - start_step):.3f}"])
             logf.flush()
 
