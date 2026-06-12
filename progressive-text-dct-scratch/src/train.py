@@ -37,6 +37,10 @@ VARIANTS = {
     "enc_latent": {"mode": "latent", "encoder": "transformer",
                    "bottleneck": "latent"},                  # B
     "emb_dct": {"mode": "dct"},                              # C (= main rerun)
+    # task4: A + K=0 (unconditional LM mode) mixed into training so the model
+    # doubles as its own fluency scorer
+    "enc_dct_k0": {"mode": "dct", "encoder": "transformer",
+                   "k_zero_prob": 0.1},
 }
 
 
@@ -62,6 +66,7 @@ def main():
     mode = vcfg["mode"]
     arch = {"encoder": vcfg.get("encoder", "none"),
             "bottleneck": vcfg.get("bottleneck", "dct")}
+    k_zero_prob = vcfg.get("k_zero_prob", 0.0)
     out_dir = os.path.join("runs", ("sanity_" if args.sanity else "") + args.variant)
     os.makedirs(out_dir, exist_ok=True)
     seed = cfg["seed"]
@@ -141,7 +146,8 @@ def main():
     vrng = random.Random(seed + 777)
     val_idx = list(range(min(tcfg["val_samples"], len(val_store))))
     val_batches = [make_batch(val_store, val_idx[s : s + bs], vrng, k_max, n_max,
-                              variant=args.variant, device=device)
+                              variant=args.variant, device=device,
+                              k_zero_prob=k_zero_prob)
                    for s in range(0, len(val_idx), bs)]
 
     def save_ckpt(step):
@@ -166,7 +172,8 @@ def main():
             indices = [rng.randrange(n_train) for _ in range(bs)]
             ids, lens, idx, valid = make_batch(
                 train_store, indices, rng, k_max, n_max,
-                variant=args.variant, fixed_k=fixed_k, device=device)
+                variant=args.variant, fixed_k=fixed_k, device=device,
+                k_zero_prob=k_zero_prob)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 loss = model(ids, lens, idx, valid, mode=mode)
             (loss / accum).backward()

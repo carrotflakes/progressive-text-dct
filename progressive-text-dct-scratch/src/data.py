@@ -79,10 +79,11 @@ def sample_k(rng, k_max):
 
 
 def make_batch(store, indices, rng, k_max, n_max, variant="main", fixed_k=None,
-               device="cuda"):
+               device="cuda", k_zero_prob=0.0):
     """Vectorized batch: ids (B, n_max) 0-padded, lens, idx (B, k_pad), idx_valid.
 
     variant 'b3' draws K random coefficient indices (sorted); others take 0..K-1.
+    k_zero_prob: probability of K=0 (unconditional LM mode; no coefficients).
     """
     B = len(indices)
     lens = np.empty(B, dtype=np.int64)
@@ -94,6 +95,8 @@ def make_batch(store, indices, rng, k_max, n_max, variant="main", fixed_k=None,
         ids[j, :n] = toks
         lens[j] = n
         k = fixed_k if fixed_k is not None else sample_k(rng, k_max)
+        if fixed_k is None and k_zero_prob and rng.random() < k_zero_prob:
+            k = 0
         ks[j] = min(k, n)
     k_pad = int(ks.max())
     idx = np.zeros((B, k_pad), dtype=np.int64)

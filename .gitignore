@@ -5,3 +5,5 @@ data/
 runs/
 *.pt
 .cache/
+
+idea.md
