@@ -285,8 +285,15 @@ class ScratchLM(nn.Module):
     # ---------------- generation (greedy, KV cache) ----------------
 
     @torch.no_grad()
-    def generate(self, ids, lens, idx, idx_valid, mode="dct"):
-        """Greedy-decode exactly lens[b] tokens. Returns (B, n_pad) token ids."""
+    def generate(self, ids, lens, idx, idx_valid, mode="dct", temperature=0.0):
+        """Decode exactly lens[b] tokens (greedy, or sampled if temperature>0).
+        Returns (B, n_pad) token ids."""
+
+        def pick(logits):
+            if temperature > 0:
+                p = torch.softmax(logits.float() / temperature, dim=-1)
+                return torch.multinomial(p, 1).squeeze(-1)
+            return logits.float().argmax(-1)
         B = ids.shape[0]
         dev = ids.device
         n_pad = int(lens.max().item())
@@ -314,7 +321,7 @@ class ScratchLM(nn.Module):
         for blk in self.blocks:
             x, past = blk(x, mask, self.rope_cos, self.rope_sin, pos0=0)
             pasts.append(past)
-        tok = self.head(self.ln_f(x[:, -1])).argmax(-1)   # t_1
+        tok = pick(self.head(self.ln_f(x[:, -1])))   # t_1
 
         out = torch.zeros(B, n_pad, dtype=torch.long, device=dev)
         out[:, 0] = tok
@@ -330,6 +337,6 @@ class ScratchLM(nn.Module):
                                 pos0=P + t, past=past)
                 new_pasts.append(npast)
             pasts = new_pasts
-            tok = self.head(self.ln_f(xt[:, -1])).argmax(-1)
+            tok = pick(self.head(self.ln_f(xt[:, -1])))
             out[:, t] = tok
         return out * text_valid
