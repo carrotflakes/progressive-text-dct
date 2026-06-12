@@ -252,7 +252,8 @@ class ScratchLM(nn.Module):
 
     # ---------------- training forward ----------------
 
-    def forward(self, ids, lens, idx, idx_valid, mode="dct"):
+    def forward(self, ids, lens, idx, idx_valid, mode="dct",
+                return_logits=False):
         """Teacher-forced CE loss. ids (B, n_max) padded with -1 -> masked."""
         B = ids.shape[0]
         dev = ids.device
@@ -277,6 +278,8 @@ class ScratchLM(nn.Module):
         labels = torch.where(text_valid, ids_in, torch.full_like(ids_in, -100))
         loss = F.cross_entropy(logits.float().flatten(0, 1), labels.flatten(),
                                ignore_index=-100)
+        if return_logits:
+            return loss, logits
         return loss
 
     # ---------------- generation (greedy, KV cache) ----------------
